@@ -1,0 +1,5 @@
+@use "tokens";
+
+.btn {
+  color: tokens.$primary;
+}

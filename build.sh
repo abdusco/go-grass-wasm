@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT_WASM="${1:-grass.wasm}"
+OUT_WASM="${1:-grass/grass.wasm}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required" >&2
@@ -28,6 +28,7 @@ docker run --rm \
     rustup target add wasm32-wasip1
     cargo build --release --target wasm32-wasip1 -p grass --bin grass
 
+    mkdir -p "$(dirname "/out/$OUT_WASM")"
     cp target/wasm32-wasip1/release/grass.wasm "/out/$OUT_WASM"
   '
 

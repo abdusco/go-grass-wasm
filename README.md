@@ -2,11 +2,14 @@
 
 A small CLI wrapper that runs the Rust [grass](https://github.com/connorskees/grass) Sass compiler as WASM using [wazero](https://github.com/tetratelabs/wazero).
 
+It also includes a reusable Go library package at `go-grass/grass`.
+
 ## What this does
 
 - Builds `grass` as a `wasm32-wasip1` module in Docker (no host Rust toolchain needed).
 - Runs that WASM module from Go.
 - Supports file and stdin input, and file or stdout output.
+- Exposes a Go `Options` type for supported compiler options.
 
 ## Requirements
 
@@ -19,7 +22,7 @@ A small CLI wrapper that runs the Rust [grass](https://github.com/connorskees/gr
 ./build.sh
 ```
 
-This writes `grass.wasm` to the current directory.
+This writes an embeddable module to `grass/grass.wasm` by default.
 
 Optional output filename:
 
@@ -38,24 +41,62 @@ go build -o go-grass .
 ```bash
 ./go-grass -i - -o -
 ./go-grass -i styles.scss -o styles.css
-```
-
-Optional WASM path override:
-
-```bash
-./go-grass -wasm grass.wasm -i styles.scss -o -
+./go-grass -i styles.scss -o styles.css --style compressed
+./go-grass -i styles.scss -o styles.css --include-dir node_modules/susy/sass
 ```
 
 ## Flags
 
 - `-i` input path or `-` for stdin (default: `-`)
 - `-o` output path or `-` for stdout (default: `-`)
-- `-wasm` path to wasm module (default: `grass.wasm`)
+- `--style` output style: `expanded` or `compressed` (default: `expanded`)
+- `--include-dir` import directory; repeat this flag for multiple directories
+
+Only `--style` and `--include-dir` are exposed as grass compiler options in the CLI.
+
+## Go library
+
+```go
+package main
+
+import (
+  "context"
+  "fmt"
+
+  "go-grass/grass"
+)
+
+func main() {
+  ctx := context.Background()
+
+  compiler, err := grass.NewCompiler(ctx)
+  if err != nil {
+    panic(err)
+  }
+  defer compiler.Close(ctx)
+
+  css, err := compiler.CompileString(ctx, "$c: #333; .a { color: $c; }", grass.Options{
+    Style: grass.StyleCompressed,
+    IncludeDirs: []string{"./styles", "./node_modules"},
+  })
+  if err != nil {
+    panic(err)
+  }
+
+  fmt.Println(string(css))
+}
+```
+
+Supported library options (`grass.Options`):
+
+- `Style` (`expanded` or `compressed`)
+- `IncludeDirs` (mapped to grass `-I` load paths)
+
+`unicode_error_messages` remains enabled by default.
 
 ## Notes
 
-- In file-input mode, the current working directory is mounted into the WASI filesystem so Sass imports work normally.
-- Absolute input paths outside the current working directory are rejected.
+- In file-input mode, the input file directory and each `--include-dir` are mounted into the WASI filesystem.
 - Compiler/runtime errors are printed to stderr and return a non-zero exit code.
 
 ## Quick test
