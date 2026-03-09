@@ -2,7 +2,7 @@
 
 A small CLI wrapper that runs the Rust [grass](https://github.com/connorskees/grass) Sass compiler as WASM using [wazero](https://github.com/tetratelabs/wazero).
 
-It also includes a reusable Go library package at `go-grass/grass`.
+It also includes a reusable Go library package at `grass` (import path `go-grass/grass`).
 
 ## What this does
 
