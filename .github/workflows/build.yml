@@ -2,10 +2,29 @@ name: Build and Release
 
 on:
   push:
+    branches: [master]
     tags: ["v*"]
+  pull_request:
+    branches: [master]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Go tests
+        run: go test ./...
+
   build-release-and-pr:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -14,12 +33,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Build embedded wasm
         env:
           DOCKER_BUILD_FLAGS: --load --cache-from type=gha --cache-to type=gha,mode=max
         run: ./build.sh
+
+      - name: Run Go tests
+        run: go test ./...
 
       - name: Detect embedded wasm changes
         id: changes
