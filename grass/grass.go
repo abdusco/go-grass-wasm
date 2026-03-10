@@ -1,7 +1,6 @@
 package grass
 
 import (
-	"bytes"
 	"context"
 	_ "embed"
 	"errors"
@@ -10,15 +9,18 @@ import (
 	"strings"
 
 	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/sys"
 )
 
-type Style string
+//go:embed grass.wasm
+var grassWASM []byte
+
+type Style int32
 
 const (
-	StyleExpanded   Style = "expanded"
-	StyleCompressed Style = "compressed"
+	StyleExpanded Style = iota
+	StyleCompressed
 )
 
 type Options struct {
@@ -27,15 +29,14 @@ type Options struct {
 }
 
 type CompileError struct {
-	ExitCode uint32
-	Stderr   string
+	Stderr string
 }
 
 func (e *CompileError) Error() string {
-	if e.Stderr != "" {
-		return fmt.Sprintf("grass exited with code %d: %s", e.ExitCode, strings.TrimSpace(e.Stderr))
+	if e.Stderr == "" {
+		return "compilation failed"
 	}
-	return fmt.Sprintf("grass exited with code %d", e.ExitCode)
+	return strings.TrimSpace(e.Stderr)
 }
 
 type Compiler struct {
@@ -43,152 +44,235 @@ type Compiler struct {
 	compiled wazero.CompiledModule
 }
 
-//go:embed grass.wasm
-var grassWASM []byte
-
 func NewCompiler(ctx context.Context) (*Compiler, error) {
 	if len(grassWASM) == 0 {
 		return nil, fmt.Errorf("embedded grass.wasm is empty")
 	}
 
 	runtime := wazero.NewRuntime(ctx)
-
 	if _, err := wasi_snapshot_preview1.Instantiate(ctx, runtime); err != nil {
 		_ = runtime.Close(ctx)
-		return nil, fmt.Errorf("instantiating WASI: %w", err)
+		return nil, fmt.Errorf("instantiate WASI: %w", err)
 	}
 
 	compiled, err := runtime.CompileModule(ctx, grassWASM)
 	if err != nil {
 		_ = runtime.Close(ctx)
-		return nil, fmt.Errorf("compiling wasm module: %w", err)
+		return nil, fmt.Errorf("compile wasm module: %w", err)
 	}
 
 	return &Compiler{runtime: runtime, compiled: compiled}, nil
 }
 
 func (c *Compiler) Close(ctx context.Context) error {
-	err1 := c.compiled.Close(ctx)
-	err2 := c.runtime.Close(ctx)
-	if err1 != nil {
-		return err1
+	errA := c.compiled.Close(ctx)
+	errB := c.runtime.Close(ctx)
+	if errA != nil {
+		return errA
 	}
-	return err2
+	return errB
 }
 
-func (c *Compiler) CompileFile(ctx context.Context, inputPath string, options Options) ([]byte, error) {
-	runCfg, stderrBuf, err := c.newModuleConfig(inputPath, nil, options)
+func (c *Compiler) CompilePath(ctx context.Context, path string, opts Options) ([]byte, error) {
+	run, err := c.newRun(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer run.mod.Close(ctx)
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve path %q: %w", path, err)
+	}
+
+	pathBytes := []byte(filepath.ToSlash(absPath))
+	pathPtr, err := run.writeBytes(ctx, pathBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer run.freeBytes(ctx, pathPtr, uint64(len(pathBytes)))
+
+	includeDirs, err := normalizeIncludeDirs(opts.IncludeDirs)
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = c.runtime.InstantiateModule(ctx, c.compiled, runCfg.config)
+	incBytes := []byte(strings.Join(includeDirs, "\n"))
+	incPtr, err := run.writeBytes(ctx, incBytes)
 	if err != nil {
-		return nil, decorateRunError(err, stderrBuf)
+		return nil, err
 	}
+	defer run.freeBytes(ctx, incPtr, uint64(len(incBytes)))
 
-	return runCfg.stdoutBuf.Bytes(), nil
-}
-
-func (c *Compiler) CompileString(ctx context.Context, source string, options Options) ([]byte, error) {
-	runCfg, stderrBuf, err := c.newModuleConfig("", strings.NewReader(source), options)
+	style := normalizeStyle(opts.Style)
+	status, err := run.call1(ctx, "compile_path", pathPtr, uint64(len(pathBytes)), uint64(style), incPtr, uint64(len(incBytes)))
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = c.runtime.InstantiateModule(ctx, c.compiled, runCfg.config)
+	if status != 0 {
+		stderr, readErr := run.readResult(ctx, "get_error_ptr", "get_error_len")
+		if readErr != nil {
+			return nil, readErr
+		}
+		return nil, &CompileError{Stderr: string(stderr)}
+	}
+
+	return run.readResult(ctx, "get_output_ptr", "get_output_len")
+}
+
+func (c *Compiler) CompileString(ctx context.Context, source string, opts Options) ([]byte, error) {
+	run, err := c.newRun(ctx)
 	if err != nil {
-		return nil, decorateRunError(err, stderrBuf)
+		return nil, err
 	}
+	defer run.mod.Close(ctx)
 
-	return runCfg.stdoutBuf.Bytes(), nil
-}
-
-type runConfig struct {
-	config    wazero.ModuleConfig
-	stdoutBuf *bytes.Buffer
-	stderrBuf *bytes.Buffer
-}
-
-func (c *Compiler) newModuleConfig(inputPath string, stdin *strings.Reader, options Options) (runConfig, *bytes.Buffer, error) {
-	args, fsConfig, err := buildArgsAndFS(inputPath, options)
+	srcBytes := []byte(source)
+	srcPtr, err := run.writeBytes(ctx, srcBytes)
 	if err != nil {
-		return runConfig{}, nil, err
+		return nil, err
+	}
+	defer run.freeBytes(ctx, srcPtr, uint64(len(srcBytes)))
+
+	includeDirs, err := normalizeIncludeDirs(opts.IncludeDirs)
+	if err != nil {
+		return nil, err
 	}
 
-	stdoutBuf := &bytes.Buffer{}
-	stderrBuf := &bytes.Buffer{}
+	incBytes := []byte(strings.Join(includeDirs, "\n"))
+	incPtr, err := run.writeBytes(ctx, incBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer run.freeBytes(ctx, incPtr, uint64(len(incBytes)))
 
-	moduleConfig := wazero.NewModuleConfig().
-		WithArgs(args...).
-		WithStdout(stdoutBuf).
-		WithStderr(stderrBuf).
-		WithFSConfig(fsConfig)
-
-	if stdin != nil {
-		moduleConfig = moduleConfig.WithStdin(stdin)
+	style := normalizeStyle(opts.Style)
+	status, err := run.call1(ctx, "compile_string", srcPtr, uint64(len(srcBytes)), uint64(style), incPtr, uint64(len(incBytes)))
+	if err != nil {
+		return nil, err
 	}
 
-	return runConfig{config: moduleConfig, stdoutBuf: stdoutBuf, stderrBuf: stderrBuf}, stderrBuf, nil
+	if status != 0 {
+		stderr, readErr := run.readResult(ctx, "get_error_ptr", "get_error_len")
+		if readErr != nil {
+			return nil, readErr
+		}
+		return nil, &CompileError{Stderr: string(stderr)}
+	}
+
+	return run.readResult(ctx, "get_output_ptr", "get_output_len")
 }
 
-func buildArgsAndFS(inputPath string, options Options) ([]string, wazero.FSConfig, error) {
-	style := options.Style
-	if style == "" {
-		style = StyleExpanded
+func normalizeStyle(style Style) Style {
+	if style == StyleCompressed {
+		return StyleCompressed
 	}
-	if style != StyleExpanded && style != StyleCompressed {
-		return nil, nil, fmt.Errorf("invalid style %q", style)
-	}
-
-	args := []string{"grass", "--style", string(style)}
-	fsConfig := wazero.NewFSConfig()
-	mountIdx := 0
-
-	mountDir := func(host string) (string, error) {
-		abs, err := filepath.Abs(host)
-		if err != nil {
-			return "", err
-		}
-		guest := fmt.Sprintf("/m%d", mountIdx)
-		mountIdx++
-		fsConfig = fsConfig.WithDirMount(abs, guest)
-		return guest, nil
-	}
-
-	for _, includeDir := range options.IncludeDirs {
-		guest, err := mountDir(includeDir)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolving include dir %q: %w", includeDir, err)
-		}
-		args = append(args, "-I", guest)
-	}
-
-	if inputPath == "" {
-		args = append(args, "--stdin")
-	} else {
-		absInput, err := filepath.Abs(inputPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolving input path %q: %w", inputPath, err)
-		}
-		guestDir, err := mountDir(filepath.Dir(absInput))
-		if err != nil {
-			return nil, nil, fmt.Errorf("mounting input dir %q: %w", filepath.Dir(absInput), err)
-		}
-		args = append(args, guestDir+"/"+filepath.Base(absInput))
-	}
-
-	return args, fsConfig, nil
+	return StyleExpanded
 }
 
-func decorateRunError(err error, stderrBuf *bytes.Buffer) error {
-	var exitErr *sys.ExitError
-	if errors.As(err, &exitErr) {
-		return &CompileError{ExitCode: exitErr.ExitCode(), Stderr: stderrBuf.String()}
+type wasmRun struct {
+	mod     api.Module
+	memory  api.Memory
+	alloc   api.Function
+	dealloc api.Function
+}
+
+func (c *Compiler) newRun(ctx context.Context) (*wasmRun, error) {
+	mod, err := c.runtime.InstantiateModule(ctx, c.compiled, wazero.NewModuleConfig().WithFSConfig(wazero.NewFSConfig().WithDirMount("/", "/")))
+	if err != nil {
+		return nil, fmt.Errorf("instantiate wasm module: %w", err)
 	}
 
-	if stderrBuf.Len() > 0 {
-		return fmt.Errorf("running grass wasm: %w: %s", err, strings.TrimSpace(stderrBuf.String()))
+	run := &wasmRun{mod: mod, memory: mod.Memory()}
+	if run.memory == nil {
+		_ = mod.Close(ctx)
+		return nil, fmt.Errorf("wasm module has no exported memory")
 	}
-	return fmt.Errorf("running grass wasm: %w", err)
+
+	run.alloc = mod.ExportedFunction("alloc")
+	run.dealloc = mod.ExportedFunction("dealloc")
+	if run.alloc == nil || run.dealloc == nil {
+		_ = mod.Close(ctx)
+		return nil, fmt.Errorf("missing alloc/dealloc exports")
+	}
+
+	return run, nil
+}
+
+func (r *wasmRun) call1(ctx context.Context, name string, params ...uint64) (uint64, error) {
+	fn := r.mod.ExportedFunction(name)
+	if fn == nil {
+		return 0, fmt.Errorf("missing export %q", name)
+	}
+
+	results, err := fn.Call(ctx, params...)
+	if err != nil {
+		return 0, fmt.Errorf("call %s: %w", name, err)
+	}
+	if len(results) == 0 {
+		return 0, nil
+	}
+	return results[0], nil
+}
+
+func (r *wasmRun) writeBytes(ctx context.Context, data []byte) (uint64, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+
+	results, err := r.alloc.Call(ctx, uint64(len(data)))
+	if err != nil {
+		return 0, fmt.Errorf("alloc: %w", err)
+	}
+	ptr := uint32(results[0])
+	if ok := r.memory.Write(ptr, data); !ok {
+		return 0, fmt.Errorf("write memory failed")
+	}
+	return uint64(ptr), nil
+}
+
+func (r *wasmRun) freeBytes(ctx context.Context, ptr uint64, length uint64) {
+	if ptr == 0 || length == 0 {
+		return
+	}
+	_, _ = r.dealloc.Call(ctx, ptr, length)
+}
+
+func (r *wasmRun) readResult(ctx context.Context, ptrFn, lenFn string) ([]byte, error) {
+	ptr, err := r.call1(ctx, ptrFn)
+	if err != nil {
+		return nil, err
+	}
+	length, err := r.call1(ctx, lenFn)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return []byte{}, nil
+	}
+
+	view, ok := r.memory.Read(uint32(ptr), uint32(length))
+	if !ok {
+		return nil, errors.New("read memory failed")
+	}
+	out := make([]byte, len(view))
+	copy(out, view)
+	return out, nil
+}
+
+func normalizeIncludeDirs(includeDirs []string) ([]string, error) {
+	out := make([]string, 0, len(includeDirs))
+	for _, dir := range includeDirs {
+		trimmed := strings.TrimSpace(dir)
+		if trimmed == "" {
+			continue
+		}
+		abs, err := filepath.Abs(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("resolve include-dir %q: %w", dir, err)
+		}
+		out = append(out, filepath.ToSlash(abs))
+	}
+	return out, nil
 }

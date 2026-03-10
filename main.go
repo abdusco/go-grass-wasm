@@ -31,7 +31,13 @@ func main() {
 
 	flag.Parse()
 
-	opts := grass.Options{Style: grass.Style(*style), IncludeDirs: includeDirs}
+	parsedStyle, err := parseStyle(*style)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "go-grass: %v\n", err)
+		os.Exit(1)
+	}
+
+	opts := grass.Options{Style: parsedStyle, IncludeDirs: includeDirs}
 
 	ctx := context.Background()
 	compiler, err := grass.NewCompiler(ctx)
@@ -55,7 +61,7 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		css, err = compiler.CompileFile(ctx, *in, opts)
+		css, err = compiler.CompilePath(ctx, *in, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "go-grass: %v\n", err)
 			os.Exit(1)
@@ -73,5 +79,16 @@ func main() {
 	if err := os.WriteFile(*out, css, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "go-grass: writing %s: %v\n", *out, err)
 		os.Exit(1)
+	}
+}
+
+func parseStyle(value string) (grass.Style, error) {
+	switch value {
+	case "expanded", "":
+		return grass.StyleExpanded, nil
+	case "compressed":
+		return grass.StyleCompressed, nil
+	default:
+		return grass.StyleExpanded, fmt.Errorf("invalid --style %q (expected expanded or compressed)", value)
 	}
 }

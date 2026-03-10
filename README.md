@@ -6,7 +6,7 @@ It also includes a reusable Go library package at `grass` (import path `go-grass
 
 ## What this does
 
-- Builds `grass` as a `wasm32-wasip1` module in Docker (no host Rust toolchain needed).
+- Builds a tiny Rust WASM shim (backed by `grass_compiler`) in Docker.
 - Runs that WASM module from Go.
 - Supports file and stdin input, and file or stdout output.
 - Exposes a Go `Options` type for supported compiler options.
@@ -93,6 +93,11 @@ Supported library options (`grass.Options`):
 - `IncludeDirs` (mapped to grass `-I` load paths)
 
 `unicode_error_messages` remains enabled by default.
+
+Main library methods:
+
+- `CompilePath(ctx, path, opts)` for file-based, multi-file Sass projects.
+- `CompileString(ctx, source, opts)` for in-memory source input.
 
 ## Notes
 
