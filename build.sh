@@ -26,15 +26,8 @@ docker run --rm \
     rustup target add wasm32-wasip1
     cargo build --release --target wasm32-wasip1
 
-    wasm-opt -Oz \
-      --all-features \
-      --strip-dwarf \
-      --strip-producers \
-      -o /tmp/grass.optimized.wasm \
-      target/wasm32-wasip1/release/grass_wasm_shim.wasm
-
     mkdir -p "$(dirname "/out/$OUT_WASM")"
-    cp /tmp/grass.optimized.wasm "/out/$OUT_WASM"
+    cp target/wasm32-wasip1/release/grass_wasm_shim.wasm "/out/$OUT_WASM"
   '
 
 echo "Built $OUT_WASM"
