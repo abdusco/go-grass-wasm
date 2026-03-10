@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"go-grass/grass"
+	"github.com/abdusco/go-grass-wasm/grass"
 )
 
 type stringList []string

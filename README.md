@@ -2,7 +2,7 @@
 
 A small CLI wrapper that runs the Rust [grass](https://github.com/connorskees/grass) Sass compiler as WASM using [wazero](https://github.com/tetratelabs/wazero).
 
-It also includes a reusable Go library package at `grass` (import path `go-grass/grass`).
+It also includes a reusable Go library package at `grass` (import path `github.com/abdusco/go-grass-wasm/grass`).
 
 ## What this does
 
@@ -63,7 +63,7 @@ import (
   "context"
   "fmt"
 
-  "go-grass/grass"
+  "github.com/abdusco/go-grass-wasm/grass"
 )
 
 func main() {

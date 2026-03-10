@@ -1,4 +1,4 @@
-module go-grass
+module github.com/abdusco/go-grass-wasm
 
 go 1.22
 
