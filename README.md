@@ -91,6 +91,7 @@ Supported library options (`grass.Options`):
 
 - `Style` (`expanded` or `compressed`)
 - `IncludeDirs` (mapped to grass `-I` load paths)
+- `FS` (`fs.FS` mount for virtual/memory filesystems; read-only)
 
 `unicode_error_messages` remains enabled by default.
 
@@ -98,6 +99,11 @@ Main library methods:
 
 - `CompilePath(ctx, path, opts)` for file-based, multi-file Sass projects.
 - `CompileString(ctx, source, opts)` for in-memory source input.
+
+When `Options.FS` is set:
+
+- `CompilePath` and `IncludeDirs` are treated as guest paths (for example `/styles/main.scss`, `/styles`).
+- The mounted filesystem is exposed read-only to WASM.
 
 ## Notes
 

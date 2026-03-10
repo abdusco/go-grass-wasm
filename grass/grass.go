@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io/fs"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -26,6 +28,7 @@ const (
 type Options struct {
 	Style       Style
 	IncludeDirs []string
+	FS          fs.FS
 }
 
 type CompileError struct {
@@ -74,25 +77,25 @@ func (c *Compiler) Close(ctx context.Context) error {
 }
 
 func (c *Compiler) CompilePath(ctx context.Context, path string, opts Options) ([]byte, error) {
-	run, err := c.newRun(ctx)
+	run, err := c.newRun(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 	defer run.mod.Close(ctx)
 
-	absPath, err := filepath.Abs(path)
+	normalizedPath, err := normalizeInputPath(path, opts.FS != nil)
 	if err != nil {
 		return nil, fmt.Errorf("resolve path %q: %w", path, err)
 	}
 
-	pathBytes := []byte(filepath.ToSlash(absPath))
+	pathBytes := []byte(normalizedPath)
 	pathPtr, err := run.writeBytes(ctx, pathBytes)
 	if err != nil {
 		return nil, err
 	}
 	defer run.freeBytes(ctx, pathPtr, uint64(len(pathBytes)))
 
-	includeDirs, err := normalizeIncludeDirs(opts.IncludeDirs)
+	includeDirs, err := normalizeIncludeDirs(opts.IncludeDirs, opts.FS != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +125,7 @@ func (c *Compiler) CompilePath(ctx context.Context, path string, opts Options) (
 }
 
 func (c *Compiler) CompileString(ctx context.Context, source string, opts Options) ([]byte, error) {
-	run, err := c.newRun(ctx)
+	run, err := c.newRun(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +138,7 @@ func (c *Compiler) CompileString(ctx context.Context, source string, opts Option
 	}
 	defer run.freeBytes(ctx, srcPtr, uint64(len(srcBytes)))
 
-	includeDirs, err := normalizeIncludeDirs(opts.IncludeDirs)
+	includeDirs, err := normalizeIncludeDirs(opts.IncludeDirs, opts.FS != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -178,8 +181,15 @@ type wasmRun struct {
 	dealloc api.Function
 }
 
-func (c *Compiler) newRun(ctx context.Context) (*wasmRun, error) {
-	mod, err := c.runtime.InstantiateModule(ctx, c.compiled, wazero.NewModuleConfig().WithFSConfig(wazero.NewFSConfig().WithDirMount("/", "/")))
+func (c *Compiler) newRun(ctx context.Context, opts Options) (*wasmRun, error) {
+	fsConfig := wazero.NewFSConfig()
+	if opts.FS != nil {
+		fsConfig = fsConfig.WithFSMount(newReadOnlyFS(opts.FS), "/")
+	} else {
+		fsConfig = fsConfig.WithDirMount("/", "/")
+	}
+
+	mod, err := c.runtime.InstantiateModule(ctx, c.compiled, wazero.NewModuleConfig().WithFSConfig(fsConfig))
 	if err != nil {
 		return nil, fmt.Errorf("instantiate wasm module: %w", err)
 	}
@@ -261,13 +271,19 @@ func (r *wasmRun) readResult(ctx context.Context, ptrFn, lenFn string) ([]byte, 
 	return out, nil
 }
 
-func normalizeIncludeDirs(includeDirs []string) ([]string, error) {
+func normalizeIncludeDirs(includeDirs []string, useGuestPaths bool) ([]string, error) {
 	out := make([]string, 0, len(includeDirs))
 	for _, dir := range includeDirs {
 		trimmed := strings.TrimSpace(dir)
 		if trimmed == "" {
 			continue
 		}
+
+		if useGuestPaths {
+			out = append(out, normalizeGuestPath(trimmed))
+			continue
+		}
+
 		abs, err := filepath.Abs(trimmed)
 		if err != nil {
 			return nil, fmt.Errorf("resolve include-dir %q: %w", dir, err)
@@ -275,4 +291,69 @@ func normalizeIncludeDirs(includeDirs []string) ([]string, error) {
 		out = append(out, filepath.ToSlash(abs))
 	}
 	return out, nil
+}
+
+func normalizeInputPath(input string, useGuestPath bool) (string, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+
+	if useGuestPath {
+		return normalizeGuestPath(trimmed), nil
+	}
+
+	abs, err := filepath.Abs(trimmed)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(abs), nil
+}
+
+func normalizeGuestPath(p string) string {
+	guest := filepath.ToSlash(strings.TrimSpace(p))
+	if !strings.HasPrefix(guest, "/") {
+		guest = "/" + guest
+	}
+	return path.Clean(guest)
+}
+
+type readOnlyFS struct {
+	inner fs.FS
+}
+
+func newReadOnlyFS(inner fs.FS) fs.FS {
+	return &readOnlyFS{inner: inner}
+}
+
+func (r *readOnlyFS) Open(name string) (fs.File, error) {
+	f, err := r.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &readOnlyFile{inner: f}, nil
+}
+
+type readOnlyFile struct {
+	inner fs.File
+}
+
+func (f *readOnlyFile) Stat() (fs.FileInfo, error) {
+	return f.inner.Stat()
+}
+
+func (f *readOnlyFile) Read(p []byte) (int, error) {
+	return f.inner.Read(p)
+}
+
+func (f *readOnlyFile) Close() error {
+	return f.inner.Close()
+}
+
+func (f *readOnlyFile) ReadDir(n int) ([]fs.DirEntry, error) {
+	reader, ok := f.inner.(fs.ReadDirFile)
+	if !ok {
+		return nil, fs.ErrInvalid
+	}
+	return reader.ReadDir(n)
 }
