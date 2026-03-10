@@ -1,0 +1,57 @@
+name: Build and Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-release-and-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build embedded wasm
+        env:
+          DOCKER_BUILD_FLAGS: --load --cache-from type=gha --cache-to type=gha,mode=max
+        run: ./build.sh
+
+      - name: Detect embedded wasm changes
+        id: changes
+        run: |
+          if git diff --quiet -- grass/grass.wasm; then
+            echo "wasm_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "wasm_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare release artifact
+        if: steps.changes.outputs.wasm_changed == 'true'
+        run: cp grass/grass.wasm grass.wasm
+
+      - name: Create Release
+        if: steps.changes.outputs.wasm_changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: grass.wasm
+          generate_release_notes: true
+
+      - name: Create PR for embedded wasm update
+        if: steps.changes.outputs.wasm_changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ci/sync-embedded-wasm-${{ github.ref_name }}
+          base: master
+          title: "chore(wasm): sync embedded wasm for ${{ github.ref_name }}"
+          commit-message: "chore(wasm): sync embedded wasm for ${{ github.ref_name }}"
+          body: |
+            Updates `grass/grass.wasm` from the tagged build `${{ github.ref_name }}`.
+
+            This PR is created automatically by CI when the embedded wasm changes.
+          add-paths: |
+            grass/grass.wasm
